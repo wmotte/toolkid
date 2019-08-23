@@ -1,0 +1,113 @@
+<ui version="4.0" >
+ <class>ViewClass</class>
+ <widget class="QMainWindow" name="ViewClass" >
+  <property name="geometry" >
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>673</width>
+    <height>523</height>
+   </rect>
+  </property>
+  <property name="windowTitle" >
+   <string>rbmView</string>
+  </property>
+  <property name="dockNestingEnabled" >
+   <bool>true</bool>
+  </property>
+  <widget class="QWidget" name="centralwidget" >
+   <property name="geometry" >
+    <rect>
+     <x>0</x>
+     <y>26</y>
+     <width>673</width>
+     <height>474</height>
+    </rect>
+   </property>
+   <layout class="QHBoxLayout" name="horizontalLayout_2" >
+    <item>
+     <widget class="rbm::ThreeView" native="1" name="widget" />
+    </item>
+   </layout>
+  </widget>
+  <widget class="QMenuBar" name="menubar" >
+   <property name="geometry" >
+    <rect>
+     <x>0</x>
+     <y>0</y>
+     <width>673</width>
+     <height>26</height>
+    </rect>
+   </property>
+   <widget class="QMenu" name="menu_File" >
+    <property name="title" >
+     <string>&amp;File</string>
+    </property>
+    <addaction name="action_Open" />
+    <addaction name="separator" />
+    <addaction name="action_Quit" />
+   </widget>
+   <addaction name="menu_File" />
+  </widget>
+  <widget class="QStatusBar" name="statusbar" >
+   <property name="geometry" >
+    <rect>
+     <x>0</x>
+     <y>500</y>
+     <width>673</width>
+     <height>23</height>
+    </rect>
+   </property>
+  </widget>
+  <action name="action_Open" >
+   <property name="text" >
+    <string>&amp;Open</string>
+   </property>
+  </action>
+  <action name="action_Quit" >
+   <property name="text" >
+    <string>&amp;Quit</string>
+   </property>
+   <property name="shortcut" >
+    <string>Alt+Q</string>
+   </property>
+  </action>
+  <action name="action_Three_planes" >
+   <property name="text" >
+    <string>&amp;Three planes</string>
+   </property>
+  </action>
+  <action name="action_One_frame" >
+   <property name="text" >
+    <string>&amp;One frame</string>
+   </property>
+  </action>
+ </widget>
+ <customwidgets>
+  <customwidget>
+   <class>rbm::ThreeView</class>
+   <extends>QWidget</extends>
+   <header>rbmThreeView.h</header>
+   <container>1</container>
+  </customwidget>
+ </customwidgets>
+ <resources/>
+ <connections>
+  <connection>
+   <sender>action_Quit</sender>
+   <signal>triggered()</signal>
+   <receiver>ViewClass</receiver>
+   <slot>close()</slot>
+   <hints>
+    <hint type="sourcelabel" >
+     <x>-1</x>
+     <y>-1</y>
+    </hint>
+    <hint type="destinationlabel" >
+     <x>336</x>
+     <y>261</y>
+    </hint>
+   </hints>
+  </connection>
+ </connections>
+</ui>

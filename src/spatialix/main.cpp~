@@ -1,0 +1,448 @@
+#include "tkdCmdParser.h"
+#include "itkResampleImageFilter.h"
+#include "itkBSplineInterpolateImageFunction.h"
+#include "itkImage.h"
+#include "itkVector.h"
+#include "itkImageFileReader.h"
+#include "itkImageFileWriter.h"
+#include "itkImageRegionIteratorWithIndex.h"
+#include "itkImageRegionConstIterator.h"
+#include "itkImageIOBase.h"
+#include "itkExtractImageFilter.h"
+#include "tkdCombinationTransform.h"
+#include "tkdAffineTransform.h"
+#include "spatialix.h"
+#include "vnl/vnl_det.h"
+
+int main( int argc, char ** argv )
+{
+  tkd::CmdParser p( "spatialix", "Spatial operations on Elastix transforms" );
+
+  typedef float PixelType;
+  typedef double ScalarType;
+  static const unsigned int Dimension = 3;
+  typedef itk::Image< PixelType, Dimension > ImageType;
+  typedef itk::ImageFileReader< ImageType > ReaderType;
+  typedef itk::ResampleImageFilter< ImageType, ImageType > FilterType;
+  typedef itk::BSplineInterpolateImageFunction< ImageType, ScalarType > InterpolatorType;
+  typedef itk::ImageFileWriter< ImageType > WriterType;
+  typedef itk::Vector< ScalarType, Dimension > VectorType;
+  typedef itk::Image< VectorType, Dimension > DeformationFieldType;
+  typedef itk::ImageFileWriter< DeformationFieldType > DeformationFieldWriterType;
+
+  std::vector< std::string > transformFileNames;
+  std::string outputTransformFileName;
+  std::string outputImageFileName;
+  std::string inputFileName;
+  std::string referenceFileName;
+  std::string outputJDFileName;
+  std::string outputDeformationFieldFileName;
+  int interpolationOrder = 3;
+  PixelType defaultPixelValue = 0;
+  bool noMatrixComposition = false;
+
+  p.AddArgument( transformFileNames, "transforms" )
+    ->AddAlias( "t" )
+    ->SetDescription( "Input transforms (supported: SimilarityTransform, AffineTransform, BSplineTransform).\n        Prefix:\n        +i = Invert transformation\n        +s = Skip reading initial transformation\n        +a = Combine by addition (default: composition)\n        +n = Normalize B-spline transform (if combined by addition)" );
+
+  p.AddArgument( referenceFileName, "reference" )
+    ->AddAlias( "r" )
+    ->SetDescription( "Reference image" );
+
+  p.AddArgument( inputFileName, "input" )
+    ->AddAlias( "i" )
+    ->SetDescription( "Input image to resample" );
+
+  p.AddArgument( outputImageFileName, "output-image" )
+    ->AddAlias( "o" )
+    ->SetDescription( "Write resampled image" );
+
+  p.AddArgument( outputTransformFileName, "output-transform" )
+    ->AddAlias( "ot" )
+    ->SetDescription( "Output transform path" );
+
+  p.AddArgument( outputJDFileName, "jacobian-determinant" )
+    ->AddAlias( "jd" )
+    ->SetDescription( "Write Jacobian determinant" );
+
+  p.AddArgument( outputDeformationFieldFileName, "deformation-field" )
+    ->AddAlias( "df" )
+    ->SetDescription( "Write deformation field" );
+
+  p.AddArgument( interpolationOrder, "order" )
+    ->AddAlias( "d" )
+    ->SetDescription( "Interpolation order" );
+
+  p.AddArgument( defaultPixelValue, "default-pixel" )
+    ->AddAlias( "dp" )
+    ->SetDescription( "Default pixel value when resampling (default: 0)" );
+
+  p.AddArgument( noMatrixComposition, "no-matrix-composition" )
+    ->AddAlias( "n" )
+    ->SetDescription( "Disable matrix composition of matrix transforms" );
+
+  if ( !p.Parse( argc, argv ) || p.GetKeys().size() == 0 )
+    {
+    p.PrintUsage( std::cout );
+    return -1;
+    }
+
+  bool inverse = false;
+  bool readInitial = true;
+  bool compose = true;
+  bool normalizeBSpline = false;
+
+  tkd::Transform::Pointer initial;
+  tkd::Spatialix spatialix;
+  for( unsigned int i = 0; i < transformFileNames.size(); ++i )
+    {
+    std::string fileName = transformFileNames[ i ];
+    if ( fileName == "+i" )
+      {
+      inverse = true;
+      continue;
+      }
+
+    if ( fileName == "+s" )
+      {
+      if ( !normalizeBSpline )
+        {
+        readInitial = false;
+        }
+
+      continue;
+      }
+
+    if ( fileName == "+a" )
+      {
+      compose = false;
+      continue;
+      }
+
+    if ( fileName == "+n" )
+      {
+      normalizeBSpline = true;
+      readInitial = true;
+      continue;
+      }
+
+    // read transform
+    tkd::Transform::Pointer transform;
+
+    try
+      {
+      std::cout << "Read " << fileName << " with readInitial=" << readInitial << ",noMatrixComposition=" << noMatrixComposition << std::endl;
+      transform = spatialix.Read( fileName, readInitial, !noMatrixComposition );
+      }
+    catch( itk::ExceptionObject& e )
+      {
+      std::cout << e.what() << std::endl;
+      return -1;
+      }
+
+    // invert
+    if ( inverse )
+      {
+      std::cout << "invert" << std::endl;
+      transform = transform->GetInverse();
+      if ( !transform )
+        {
+        std::cout << "Could not invert transform from " << fileName << std::endl;
+        return -1;
+        }
+      }
+
+    // B-spline normalization
+    if ( normalizeBSpline )
+      {
+      try
+        {
+        std::cout << "normalize" << std::endl;
+        transform = spatialix.NormalizeBSplineTransform( transform );
+        }
+      catch( itk::ExceptionObject& e )
+        {
+        std::cout << e.what() << std::endl;
+        return -1;
+        }
+      }
+
+    // how to combine
+    if ( initial )
+      {
+      std::cout << "combine with initial: compose=" << compose << std::endl;
+      initial = spatialix.Combine( initial, transform, compose, !noMatrixComposition );
+      }
+    else
+      {
+      initial = transform;
+      }
+
+    inverse = false;
+    readInitial = true;
+    compose =  true;
+    normalizeBSpline = false;
+    }
+
+  if ( !initial )
+    {
+    initial = tkd::AffineTransform::New().GetPointer();
+    }
+
+  ImageType::Pointer reference;
+
+  if ( referenceFileName != "" )
+    {
+    ReaderType::Pointer reader = ReaderType::New();
+    reader->SetFileName( referenceFileName.c_str() );
+    reader->Update();
+    reference = reader->GetOutput();
+    }
+
+  if ( outputTransformFileName != "" )
+    {
+    initial->Write( outputTransformFileName );
+    }
+
+  if ( inputFileName != "" && outputImageFileName != "" )
+    {
+    itk::ImageIOBase::Pointer io =
+      itk::ImageIOFactory::CreateImageIO( inputFileName.c_str(), itk::ImageIOFactory::ReadMode );
+
+    if ( !io )
+      {
+      std::cerr << "Could not create a reader for " << inputFileName << std::endl;
+      return -1;
+      }
+
+    io->SetFileName( inputFileName.c_str() );
+    io->ReadImageInformation();
+
+    int numberOfDimensions = io->GetNumberOfDimensions();
+    if ( numberOfDimensions == 4 && io->GetDimensions( 3 ) > 1 )
+      {
+      // 4-D image
+      typedef itk::Image< PixelType, 4 > SeriesType;
+      typedef itk::ImageFileReader< SeriesType > SeriesReaderType;
+      typedef itk::ImageFileWriter< SeriesType > SeriesWriterType;
+      SeriesReaderType::Pointer reader = SeriesReaderType::New();
+      reader->SetFileName( inputFileName.c_str() );
+      reader->Update();
+
+      SeriesType::Pointer series = reader->GetOutput();
+
+      // get first image as reference
+      if ( !reference )
+        {
+        typedef itk::ExtractImageFilter< SeriesType, ImageType > ExtractType;
+        ExtractType::Pointer extract = ExtractType::New();
+        extract->SetInput( series );
+
+        SeriesType::RegionType extractRegion = series->GetLargestPossibleRegion();
+        SeriesType::SizeType size = extractRegion.GetSize();
+        SeriesType::IndexType index = extractRegion.GetIndex();
+
+        index[ 3 ] = 0;
+        size[ 3 ] = 0;
+
+        extractRegion.SetIndex( index );
+        extractRegion.SetSize( size );
+
+        extract->SetExtractionRegion( extractRegion );
+        extract->Update();
+        reference = extract->GetOutput();
+        }
+
+      // create a pseudo-deformation field
+      typedef itk::Image< ImageType::PointType, 3 > PointImageType;
+      PointImageType::Pointer df = PointImageType::New();
+      ImageType::RegionType region = reference->GetLargestPossibleRegion();
+
+      df->CopyInformation( reference );
+      df->SetRegions( region );
+      df->Allocate();
+
+      tkd::Transform::TransformType::Pointer t = initial->GetTransform();
+
+      itk::ImageRegionIteratorWithIndex< PointImageType > itDF( df, region );
+      PointImageType::PointType inputPoint;
+      PointImageType::PointType outputPoint;
+      for( itDF.GoToBegin(); !itDF.IsAtEnd(); ++itDF )
+        {
+        df->TransformIndexToPhysicalPoint( itDF.GetIndex(), inputPoint );
+        outputPoint = t->TransformPoint( inputPoint );
+        itDF.Set( outputPoint );
+        }
+
+      // new output
+      SeriesType::Pointer output = SeriesType::New();
+      ImageType::SpacingType inputSpacing = reference->GetSpacing();
+      ImageType::PointType inputOrigin = reference->GetOrigin();
+      ImageType::SizeType inputSize = reference->GetLargestPossibleRegion().GetSize();
+      ImageType::DirectionType inputDirection = reference->GetDirection();
+      SeriesType::SpacingType outputSpacing = series->GetSpacing();
+      SeriesType::PointType outputOrigin = series->GetOrigin();
+      SeriesType::SizeType outputSize = series->GetLargestPossibleRegion().GetSize();
+      SeriesType::DirectionType outputDirection = series->GetDirection();
+      for( int i = 0; i < 3; ++i )
+        {
+        outputSpacing[ i ] = inputSpacing[ i ];
+        outputOrigin[ i ] = inputOrigin[ i ];
+        outputSize[ i ] = inputSize[ i ];
+        for( int j = 0; j < 3; ++j )
+          {
+          outputDirection[ i ][ j ] = inputDirection[ i ][ j ];
+          }
+        }
+      SeriesType::RegionType outputRegion = series->GetLargestPossibleRegion();
+      outputRegion.SetSize( outputSize );
+      output->SetSpacing( outputSpacing );
+      output->SetOrigin( outputOrigin );
+      output->SetDirection( outputDirection );
+      output->SetRegions( outputRegion );
+      output->Allocate();
+
+      // resample each individual image
+      SeriesType::RegionType extractRegion = series->GetLargestPossibleRegion();
+      SeriesType::IndexType index = extractRegion.GetIndex();
+      SeriesType::SizeType size = extractRegion.GetSize();
+
+      typedef itk::ExtractImageFilter< SeriesType, ImageType > ExtractType;
+      int numberOfVolumes = size[ 3 ];
+      size[ 3 ] = 0;
+
+      extractRegion.SetSize( size );
+      outputSize[ 3 ] = 1;
+      outputRegion.SetSize( outputSize );
+
+      for( int i = 0; i < numberOfVolumes; ++i )
+        {
+        std::cout << "\rResample volume " << ( i + 1 ) << "/" << numberOfVolumes;
+        std::cout.flush();
+        ExtractType::Pointer extract = ExtractType::New();
+        extract->SetInput( series );
+
+        index[ 3 ] = i;
+
+        extractRegion.SetIndex( index );
+        outputRegion.SetIndex( index );
+
+        extract->SetExtractionRegion( extractRegion );
+        extract->Update();
+
+        InterpolatorType::Pointer interpolator = InterpolatorType::New();
+        interpolator->SetSplineOrder( interpolationOrder );
+        interpolator->SetInputImage( extract->GetOutput() );
+
+        itk::ImageRegionIterator< SeriesType > itOut( output, outputRegion );
+        itk::ImageRegionConstIterator< PointImageType > itDF( df, region );
+        for( ; !itDF.IsAtEnd(); ++itDF, ++itOut )
+          {
+          if ( !interpolator->IsInsideBuffer( itDF.Value() ) )
+            {
+            itOut.Set( defaultPixelValue );
+            }
+          else
+            {
+            itOut.Set( interpolator->Evaluate( itDF.Value() ) );
+            }
+          }
+        }
+
+      SeriesWriterType::Pointer writer = SeriesWriterType::New();
+      writer->SetInput( output );
+      writer->SetFileName( outputImageFileName.c_str() );
+      writer->Update();
+      std::cout << std::endl;
+      }
+    else
+      {
+      ReaderType::Pointer reader = ReaderType::New();
+      reader->SetFileName( inputFileName.c_str() );
+      reader->Update();
+
+      InterpolatorType::Pointer interpolator = InterpolatorType::New();
+      interpolator->SetSplineOrder( interpolationOrder );
+      interpolator->SetInputImage( reader->GetOutput() );
+
+      FilterType::Pointer filter = FilterType::New();
+      filter->SetTransform( initial->GetTransform() );
+      filter->SetInterpolator( interpolator );
+      filter->SetInput( reader->GetOutput() );
+
+      if ( reference )
+        {
+        filter->SetOutputParametersFromImage( reference );
+        }
+      else
+        {
+        std::cout << "WARNING: no reference image supplied" << std::endl;
+        filter->SetOutputParametersFromImage( reader->GetOutput() );
+        }
+
+      filter->SetDefaultPixelValue( defaultPixelValue );
+
+      WriterType::Pointer writer = WriterType::New();
+      writer->SetInput( filter->GetOutput() );
+      writer->SetFileName( outputImageFileName.c_str() );
+      writer->Update();
+      }
+    }
+
+  if ( outputDeformationFieldFileName != "" && reference )
+    {
+    DeformationFieldType::Pointer df = DeformationFieldType::New();
+    ImageType::RegionType region = reference->GetLargestPossibleRegion();
+
+    df->CopyInformation( reference );
+    df->SetRegions( region );
+    df->Allocate();
+
+    tkd::Transform::TransformType::Pointer t = initial->GetTransform();
+
+    itk::ImageRegionIteratorWithIndex< DeformationFieldType > itDF( df, region );
+    DeformationFieldType::PointType inputPoint;
+    DeformationFieldType::PointType outputPoint;
+    for( itDF.GoToBegin(); !itDF.IsAtEnd(); ++itDF )
+      {
+      df->TransformIndexToPhysicalPoint( itDF.GetIndex(), inputPoint );
+      outputPoint = t->TransformPoint( inputPoint );
+      itDF.Set( outputPoint - inputPoint );
+      }
+
+    DeformationFieldWriterType::Pointer writer = DeformationFieldWriterType::New();
+    writer->SetInput( df );
+    writer->SetFileName( outputDeformationFieldFileName.c_str() );
+    writer->Update();
+    }
+
+  if ( outputJDFileName != "" && reference )
+    {
+    ImageType::Pointer jd = ImageType::New();
+    ImageType::RegionType region = reference->GetLargestPossibleRegion();
+
+    jd->CopyInformation( reference );
+    jd->SetRegions( region );
+    jd->Allocate();
+
+    tkd::Transform::TransformType::Pointer t = initial->GetTransform();
+
+    itk::ImageRegionIteratorWithIndex< ImageType > it( jd, region );
+    ImageType::PointType inputPoint;
+    tkd::Transform::TransformType::SpatialJacobianType jacobian;
+
+    for( it.GoToBegin(); !it.IsAtEnd(); ++it )
+      {
+      jd->TransformIndexToPhysicalPoint( it.GetIndex(), inputPoint );
+      t->GetSpatialJacobian( inputPoint, jacobian );
+      it.Set( vnl_det< ScalarType >( jacobian.GetVnlMatrix() ) );
+      }
+
+    WriterType::Pointer writer = WriterType::New();
+    writer->SetInput( jd );
+    writer->SetFileName( outputJDFileName.c_str() );
+    writer->Update();
+    }
+
+  return 0;
+}

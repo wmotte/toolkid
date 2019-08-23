@@ -1,0 +1,30 @@
+project( src )
+
+subdirs(
+  spacing
+  dkisim
+  uqp
+  dkifit
+  dtiresample
+  bayesian_dti
+  dti 
+  dtifit
+  hrffit
+  procfid
+  mrfit
+  procparser
+  dynamics
+  count
+  bolus
+  glm
+  graphs
+  cmdparser
+  nr
+  zlib
+  dbedit
+  sampling
+  processing
+  crop
+  flens
+  glmm
+)

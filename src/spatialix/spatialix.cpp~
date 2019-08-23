@@ -1,0 +1,216 @@
+#include "spatialix.h"
+#include "itkParameterFileParser.h"
+#include "itkParameterMapInterface.h"
+#include "tkdCombinationTransform.h"
+#include "itkAdvancedMatrixOffsetTransformBase.h"
+#include "itkAdvancedBSplineDeformableTransform.h"
+#include "tkdAffineTransform.h"
+#include "tkdMacro.h"
+#include "vnl/vnl_vector_fixed.h"
+#include "vnl/vnl_matrix_fixed.h"
+
+namespace tkd
+{
+
+Spatialix::Spatialix()
+{
+  this->m_Factory = TransformFactory::New();
+}
+
+Transform::Pointer Spatialix::Combine( Transform::Pointer initial, Transform::Pointer current, bool compose, bool allowMatrixComposition )
+{
+  // check whether initial and current are both derived from a matrix transform
+  typedef itk::AdvancedMatrixOffsetTransformBase<
+    Transform::ScalarType,
+    Transform::Dimension,
+    Transform::Dimension > MatrixTransformType;
+
+  MatrixTransformType* first =
+    dynamic_cast< MatrixTransformType* >( initial->GetTransform().GetPointer() );
+
+  MatrixTransformType* second =
+    dynamic_cast< MatrixTransformType* >( current->GetTransform().GetPointer() );
+    
+//  std::cout << "I=" << initial << std::endl;
+//  std::cout << "C=" << current << std::endl;
+
+  // if so, and combination is compose, do a matrix composition
+  if ( first && second && compose && allowMatrixComposition )
+    {
+    std::cout << "Combine affine" << std::endl;
+    AffineTransform::Pointer affine = tkd::AffineTransform::New();
+    AffineTransform::AffineTransformPointer affineTransform = affine->GetAffineTransform();
+    affineTransform->SetCenter( first->GetCenter() );
+    affineTransform->SetMatrix( first->GetMatrix() );
+    affineTransform->SetOffset( first->GetOffset() );
+    affineTransform->Compose( second );
+    return affine.GetPointer();
+    }
+  else
+    {
+    std::cout << "Combine" << std::endl;
+    }
+    
+  // otherwise, return a combination transform
+  CombinationTransform::Pointer combination = CombinationTransform::New();
+  combination->SetInitialTransform( initial );
+  combination->SetCurrentTransform( current );
+  combination->SetUseComposition( compose );
+
+  return combination.GetPointer();
+}
+
+Transform::Pointer Spatialix::Read( const std::vector< std::string >& transformFileNames )
+{
+  Transform::Pointer initial;
+  for( unsigned int i = 0; i < transformFileNames.size(); ++i )
+    {
+    std::cout << "Read " << transformFileNames[ i ] << std::endl;
+    Transform::Pointer current = this->Read( transformFileNames[ i ] );
+    if ( initial )
+      {
+      initial = this->Combine( initial, current );
+      }
+    else
+      {
+      initial = current;
+      }
+    }
+
+  return initial;
+}
+
+Transform::Pointer Spatialix::Read( const std::string& transformFileName, bool readInitial, bool allowMatrixComposition )
+{
+  itk::ParameterFileParser::Pointer parser = itk::ParameterFileParser::New();
+  itk::ParameterMapInterface::Pointer interface = itk::ParameterMapInterface::New();
+
+  std::cout << "Parse " << transformFileName << std::endl;
+  parser->SetParameterFileName( transformFileName );
+  parser->ReadParameterFile();
+
+  interface->SetParameterMap( parser->GetParameterMap() );
+
+  std::string error;
+  std::string transformName;
+  std::string initialTransformName = "NoInitialTransform";
+  std::string howToCombine = "Compose";
+
+  // read transform name
+  interface->ReadParameter< std::string >( transformName, "Transform", 0, true, error );
+
+  if ( readInitial )
+    {
+    // read initial transform
+
+    interface->ReadParameter< std::string >(
+        initialTransformName,
+        "InitialTransformParametersFileName",
+        0, true, error );
+
+    interface->ReadParameter< std::string >(
+        howToCombine,
+        "HowToCombineTransforms",
+        0, true, error );
+    }
+
+  // create transform
+  Transform::Pointer transform = this->m_Factory->CreateTransform( transformName );
+  if ( !transform )
+    {
+    throwMacro( "Not a valid transform in " << transformFileName );
+    }
+
+  // initialize transform
+  transform->SetParameterMap( parser->GetParameterMap() );
+  transform->Initialize( interface );
+
+  // return transform
+  if ( initialTransformName == "NoInitialTransform" )
+    {
+    return transform;
+    }
+
+  // combine with initial
+  return this->Combine(
+      this->Read( initialTransformName, readInitial, allowMatrixComposition ),
+      transform,
+      howToCombine == "Compose",
+      allowMatrixComposition );
+}
+
+Transform::Pointer Spatialix::NormalizeBSplineTransform( Transform::Pointer transform )
+{
+  typedef Transform::TransformType TransformBaseType;
+  typedef TransformBaseType::ScalarType ScalarType;
+  static const unsigned int Dimension = Transform::Dimension;
+  typedef itk::AdvancedMatrixOffsetTransformBase< ScalarType, Dimension, Dimension > MatrixTransformType;
+  typedef itk::AdvancedBSplineDeformableTransform< ScalarType, Dimension, Dimension > BSplineTransformType;
+
+  // return if BSplineTransform without initial transformation
+  if ( dynamic_cast< BSplineTransformType* >( transform->GetTransform().GetPointer() ) )
+    {
+    return transform;
+    }
+
+  CombinationTransform::Pointer combination =
+    dynamic_cast< CombinationTransform* >( transform.GetPointer() );
+
+  if ( !combination )
+    {
+    throwMacro( "Transform is not a BSplineTransform with an initial transform" );
+    }
+
+  Transform::Pointer first = combination->GetInitialTransform();
+  Transform::Pointer second = combination->GetCurrentTransform();
+
+  // first should be a matrix transform
+  MatrixTransformType* matrix = dynamic_cast< MatrixTransformType* >( first->GetTransform().GetPointer() );
+
+  // second should be a BSplineTransform
+  BSplineTransformType* bspline = dynamic_cast< BSplineTransformType* >( second->GetTransform().GetPointer() );
+
+  if ( !matrix )
+    {
+    throwMacro( "Initial transform is not a matrix transform" );
+    }
+
+  if ( !bspline )
+    {
+    throwMacro( "Current transform is not a BSplineTransform" );
+    }
+
+  // calculate inverse of first
+  vnl_matrix_fixed< double, Dimension, Dimension > inverse = matrix->GetMatrix().GetInverse();
+
+  // re-orient B-spline grid
+  BSplineTransformType::ImagePointer* coefficients = bspline->GetCoefficientImage();
+  typedef itk::ImageRegionIterator< BSplineTransformType::ImageType > IteratorType;
+
+  IteratorType it[ Dimension ];
+  for( unsigned int i = 0; i < Dimension; ++i )
+    {
+    it[ i ] = IteratorType( coefficients[ i ], coefficients[ i ]->GetLargestPossibleRegion() );
+    }
+
+  vnl_vector_fixed< double, Dimension > vector;
+  while( !it[ 0 ].IsAtEnd() )
+    {
+    for( unsigned int i = 0; i < Dimension; ++i )
+      {
+      vector[ i ] = it[ i ].Value();
+      }
+
+    vector = inverse * vector;
+
+    for( unsigned int i = 0; i < Dimension; ++i )
+      {
+      it[ i ].Set( vector[ i ] );
+      ++it[ i ];
+      }
+    }
+
+  return second;
+}
+
+} // end namespace tkd
